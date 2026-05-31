@@ -1,0 +1,8 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.log
+*.tmp
+*.bak
+ui_preview.png
