@@ -10,7 +10,7 @@ from typing import Callable, Iterable
 from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
 try:
-    from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt
+    from PyQt6.QtCore import QByteArray, QPointF, QRectF, Qt, QTimer
     from PyQt6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen
     from PyQt6.QtSvg import QSvgRenderer
     from PyQt6.QtWidgets import (
@@ -29,6 +29,7 @@ try:
         QPushButton,
         QScrollArea,
         QSizePolicy,
+        QSplitter,
         QSpinBox,
         QVBoxLayout,
         QWidget,
@@ -264,6 +265,9 @@ UI_TEXT["zh"].update({
     "max_frames": "最大帧数",
     "frame_step": "抽帧间隔",
     "frame_delay": "帧延时(ms)",
+    "play_animation": "播放预览",
+    "pause_animation": "暂停播放",
+    "status_processing": "正在取模",
     "manual_caption": "手动 / 文字",
     "manual_settings": "手动点亮",
     "text_settings": "文字设置",
@@ -297,6 +301,9 @@ UI_TEXT["en"].update({
     "max_frames": "Max frames",
     "frame_step": "Frame step",
     "frame_delay": "Frame delay(ms)",
+    "play_animation": "Play preview",
+    "pause_animation": "Pause",
+    "status_processing": "Sampling",
     "manual_caption": "Manual / text",
     "manual_settings": "Manual pixels",
     "text_settings": "Text settings",
@@ -334,6 +341,13 @@ QFrame#PreviewGlass {
 QFrame#SectionFrame {
   background: transparent;
   border: 0;
+}
+QSplitter::handle {
+  background: rgba(148, 163, 184, 70);
+  border-radius: 3px;
+}
+QSplitter::handle:hover {
+  background: rgba(203, 213, 225, 130);
 }
 QLabel {
   color: #eef2f6;
@@ -481,6 +495,13 @@ QFrame#PreviewGlass {
 QFrame#SectionFrame {
   background: transparent;
   border: 0;
+}
+QSplitter::handle {
+  background: #d8dee6;
+  border-radius: 3px;
+}
+QSplitter::handle:hover {
+  background: #b9c1ca;
 }
 QLabel {
   color: #1f2937;
@@ -1805,9 +1826,16 @@ if Qt is not None:
             self.matrix: list[list[RGB]] = []
             self.manual_matrix: list[list[RGB]] = blank_matrix(16, 16)
             self.animation_frames: list[list[list[RGB]]] = []
+            self.animation_cache_key: tuple[object, ...] | None = None
             self.brush_color = DEFAULT_BRUSH_COLOR
             self.setMinimumSize(1040, 620)
             self.setStyleSheet(LIGHT_STYLE)
+
+            self.refresh_timer = QTimer(self)
+            self.refresh_timer.setSingleShot(True)
+            self.refresh_timer.timeout.connect(self.refresh_matrix)
+            self.play_timer = QTimer(self)
+            self.play_timer.timeout.connect(self.advance_animation_frame)
 
             self.preview = MatrixPreview()
             self.source_preview = SourcePreview()
@@ -1888,6 +1916,8 @@ if Qt is not None:
             self.frame_delay_spin = QSpinBox()
             self.frame_delay_spin.setRange(1, 10000)
             self.frame_delay_spin.setValue(100)
+            self.play_button = QPushButton()
+            self.play_button.setCheckable(True)
 
             self.array_name_edit = QLineEdit("ws2812_image_16x16")
             self.language_combo = QComboBox()
@@ -1971,6 +2001,7 @@ if Qt is not None:
             self.brush_color_button.clicked.connect(self.choose_brush_color)
             self.fill_button.clicked.connect(self.fill_manual_matrix)
             self.clear_button.clicked.connect(self.clear_manual_matrix)
+            self.play_button.clicked.connect(self.toggle_animation_playback)
 
             self.root = TechBackground()
             root_layout = QVBoxLayout(self.root)
@@ -2001,9 +2032,10 @@ if Qt is not None:
             header_layout.addLayout(language_box)
             root_layout.addWidget(header)
 
-            body_layout = QHBoxLayout()
-            body_layout.setSpacing(12)
-            root_layout.addLayout(body_layout, 1)
+            body_splitter = QSplitter(Qt.Orientation.Horizontal)
+            body_splitter.setChildrenCollapsible(False)
+            body_splitter.setHandleWidth(8)
+            root_layout.addWidget(body_splitter, 1)
 
             controls = QFrame()
             controls.setObjectName("ControlsGlass")
@@ -2083,6 +2115,7 @@ if Qt is not None:
             animation_form.addRow(self.frame_delay_label, self.frame_delay_spin)
             animation_box_layout.addWidget(self.animation_caption_label)
             animation_box_layout.addLayout(animation_form)
+            animation_box_layout.addWidget(self.play_button)
             controls_layout.addWidget(animation_box)
 
             svg_box = QFrame()
@@ -2146,14 +2179,22 @@ if Qt is not None:
             controls_scroll.setWidgetResizable(True)
             controls_scroll.setFrameShape(QFrame.Shape.NoFrame)
             controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            controls_scroll.setMinimumWidth(320)
-            controls_scroll.setMaximumWidth(380)
+            controls_scroll.setMinimumWidth(220)
             controls_scroll.setWidget(controls)
-            body_layout.addWidget(controls_scroll)
+            body_splitter.addWidget(controls_scroll)
+
+            self.source_panel = QFrame()
+            self.source_panel.setObjectName("PreviewGlass")
+            self.source_panel.setMinimumWidth(240)
+            add_glass_shadow(self.source_panel)
+            source_layout = QVBoxLayout(self.source_panel)
+            source_layout.setContentsMargins(14, 14, 14, 14)
+            source_layout.addWidget(self.source_preview, 1)
+            body_splitter.addWidget(self.source_panel)
 
             preview_panel = QFrame()
             preview_panel.setObjectName("PreviewGlass")
-            preview_panel.setMinimumWidth(360)
+            preview_panel.setMinimumWidth(280)
             add_glass_shadow(preview_panel)
             preview_layout = QVBoxLayout(preview_panel)
             preview_layout.setContentsMargins(14, 14, 14, 14)
@@ -2166,12 +2207,12 @@ if Qt is not None:
             metrics.addLayout(self.metric_block(self.layout_name_label, self.layout_value_label))
             metrics.addStretch(1)
             preview_layout.addLayout(metrics)
-            preview_compare = QHBoxLayout()
-            preview_compare.setSpacing(12)
-            preview_compare.addWidget(self.source_preview, 1)
-            preview_compare.addWidget(self.preview, 1)
-            preview_layout.addLayout(preview_compare, 1)
-            body_layout.addWidget(preview_panel, 1)
+            preview_layout.addWidget(self.preview, 1)
+            body_splitter.addWidget(preview_panel)
+            body_splitter.setStretchFactor(0, 0)
+            body_splitter.setStretchFactor(1, 1)
+            body_splitter.setStretchFactor(2, 1)
+            body_splitter.setSizes([320, 430, 530])
 
             self.setCentralWidget(self.root)
 
@@ -2192,20 +2233,19 @@ if Qt is not None:
                 self.svg_cut_tolerance_spin,
                 self.svg_background_combo,
                 self.svg_color_combo,
-                self.font_combo,
                 self.text_scale_spin,
-                self.frame_index_spin,
                 self.max_frames_spin,
                 self.frame_step_spin,
-                self.frame_delay_spin,
             ):
                 if isinstance(widget, QSpinBox):
-                    widget.valueChanged.connect(self.refresh_matrix)
+                    widget.valueChanged.connect(self.schedule_refresh)
                 else:
-                    widget.currentIndexChanged.connect(self.refresh_matrix)
-            self.text_edit.textChanged.connect(self.refresh_matrix)
+                    widget.currentIndexChanged.connect(self.schedule_refresh)
+            self.frame_index_spin.valueChanged.connect(self.handle_frame_index_changed)
+            self.frame_delay_spin.valueChanged.connect(self.update_play_timer_delay)
+            self.text_edit.textChanged.connect(self.schedule_refresh)
             self.font_combo.currentIndexChanged.connect(self.change_font_choice)
-            self.font_edit.textChanged.connect(self.refresh_matrix)
+            self.font_edit.textChanged.connect(self.schedule_refresh)
 
             self.apply_language()
             self.apply_theme()
@@ -2241,6 +2281,8 @@ if Qt is not None:
             self.set_widgets_visible(self.manual_widgets, manual_mode)
             self.set_widgets_visible(self.cutout_widgets, image_mode)
             self.source_preview.setVisible(image_mode)
+            self.source_panel.setVisible(image_mode)
+            self.play_button.setVisible(mode == MODE_ANIMATION)
 
             if mode == MODE_ANIMATION:
                 self.open_button.setText(self.text("open_media"))
@@ -2254,6 +2296,8 @@ if Qt is not None:
             else:
                 self.manual_caption_label.setText(self.text("manual_caption"))
                 self.svg_caption_label.setText(self.text("svg_caption"))
+            if mode != MODE_ANIMATION and self.play_timer.isActive():
+                self.stop_animation_playback()
 
         def update_source_preview(self) -> None:
             mode = self.mode_combo.currentData()
@@ -2328,6 +2372,7 @@ if Qt is not None:
             self.svg_main_color_label.setText(self.text("svg_main_color"))
             self.open_button.setText(self.text("open_image"))
             self.export_button.setText(self.text("export_header"))
+            self.play_button.setText(self.text("pause_animation") if self.play_button.isChecked() else self.text("play_animation"))
             self.size_name_label.setText(self.text("metric_size"))
             self.led_name_label.setText(self.text("metric_leds"))
             self.layout_name_label.setText(self.text("metric_layout"))
@@ -2417,6 +2462,89 @@ if Qt is not None:
             self.apply_color_button(self.brush_color_button, self.brush_color)
             self.preview.set_brush_color(self.brush_color)
 
+        def schedule_refresh(self) -> None:
+            self.animation_cache_key = None
+            self.stop_animation_playback()
+            self.status_label.setText(self.text("status_processing"))
+            self.refresh_timer.start(120)
+
+        def animation_settings_key(self) -> tuple[object, ...]:
+            image_stat = None
+            if self.image_path is not None:
+                try:
+                    resolved = resolve_existing_path(self.image_path)
+                    stat = resolved.stat()
+                    image_stat = (str(resolved), stat.st_size, int(stat.st_mtime))
+                except OSError:
+                    image_stat = str(self.image_path)
+            return (
+                image_stat,
+                self.rows_spin.value(),
+                self.cols_spin.value(),
+                self.resample_combo.currentData(),
+                self.rotation_combo.currentData(),
+                self.svg_cut_combo.currentData(),
+                self.svg_cut_color,
+                self.svg_cut_tolerance_spin.value(),
+                self.svg_background_combo.currentData(),
+                self.svg_background_color,
+                self.svg_color_combo.currentData(),
+                self.svg_main_color,
+                self.max_frames_spin.value(),
+                self.frame_step_spin.value(),
+            )
+
+        def set_current_animation_frame(self) -> None:
+            if not self.animation_frames:
+                return
+            index = min(self.frame_index_spin.value(), len(self.animation_frames) - 1)
+            self.matrix = self.animation_frames[index]
+            self.preview.set_editable(False)
+            self.preview.set_data(self.matrix, self.current_order())
+            self.update_source_preview()
+            self.update_status()
+
+        def handle_frame_index_changed(self) -> None:
+            if self.mode_combo.currentData() == MODE_ANIMATION and self.animation_frames:
+                self.set_current_animation_frame()
+            else:
+                self.schedule_refresh()
+
+        def update_play_timer_delay(self) -> None:
+            if self.play_timer.isActive():
+                self.play_timer.setInterval(self.frame_delay_spin.value())
+
+        def stop_animation_playback(self) -> None:
+            if self.play_timer.isActive():
+                self.play_timer.stop()
+            if self.play_button.isChecked():
+                self.play_button.blockSignals(True)
+                self.play_button.setChecked(False)
+                self.play_button.blockSignals(False)
+            self.play_button.setText(self.text("play_animation"))
+
+        def toggle_animation_playback(self) -> None:
+            if self.play_button.isChecked():
+                if self.mode_combo.currentData() != MODE_ANIMATION:
+                    self.stop_animation_playback()
+                    return
+                if not self.animation_frames:
+                    self.refresh_matrix()
+                if len(self.animation_frames) <= 1:
+                    self.stop_animation_playback()
+                    return
+                self.play_button.setText(self.text("pause_animation"))
+                self.play_timer.start(self.frame_delay_spin.value())
+            else:
+                self.stop_animation_playback()
+
+        def advance_animation_frame(self) -> None:
+            if self.mode_combo.currentData() != MODE_ANIMATION or not self.animation_frames:
+                self.stop_animation_playback()
+                return
+            next_index = (self.frame_index_spin.value() + 1) % len(self.animation_frames)
+            self.frame_index_spin.setValue(next_index)
+
         @staticmethod
         def apply_color_button(button: QPushButton, color: RGB) -> None:
             text_color = "#03131E" if (color[0] * 299 + color[1] * 587 + color[2] * 114) > 150000 else "#F4FBFF"
@@ -2476,7 +2604,7 @@ if Qt is not None:
                 self.font_edit.blockSignals(True)
                 self.font_edit.setText(path)
                 self.font_edit.blockSignals(False)
-            self.refresh_matrix()
+            self.schedule_refresh()
 
         def ensure_manual_matrix_size(self) -> None:
             rows = self.rows_spin.value()
@@ -2531,6 +2659,7 @@ if Qt is not None:
                 self.status_label.setText(f"{self.text('status_ready')}  |  {size}  |  {leds} LEDs  |  {image_text}")
 
         def refresh_matrix(self) -> None:
+            self.refresh_timer.stop()
             rows = self.rows_spin.value()
             cols = self.cols_spin.value()
             mode = self.mode_combo.currentData()
@@ -2552,8 +2681,12 @@ if Qt is not None:
                         self.svg_background_color,
                     )
                 elif mode == MODE_ANIMATION:
-                    if self.image_path is None:
+                    cache_key = self.animation_settings_key()
+                    if self.animation_frames and self.animation_cache_key == cache_key:
+                        pass
+                    elif self.image_path is None:
                         self.animation_frames = [default_matrix(rows, cols)]
+                        self.animation_cache_key = cache_key
                     else:
                         self.animation_frames = load_animation_frames(
                             self.image_path,
@@ -2571,6 +2704,7 @@ if Qt is not None:
                             self.max_frames_spin.value(),
                             self.frame_step_spin.value(),
                         )
+                        self.animation_cache_key = cache_key
                     max_index = max(0, len(self.animation_frames) - 1)
                     self.frame_index_spin.blockSignals(True)
                     self.frame_index_spin.setRange(0, max_index)
@@ -2616,6 +2750,8 @@ if Qt is not None:
             )
             if selected:
                 self.image_path = Path(selected)
+                self.animation_cache_key = None
+                self.stop_animation_playback()
                 self.refresh_matrix()
 
         def default_export_path(self) -> str:
